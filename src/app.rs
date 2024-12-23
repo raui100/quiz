@@ -1,25 +1,50 @@
-/// We derive Deserialize/Serialize so we can persist app state on shutdown.
-#[derive(serde::Deserialize, serde::Serialize)]
-#[serde(default)] // if we add new fields, give them default values when deserializing old state
-pub struct TemplateApp {
-    // Example stuff:
-    label: String,
+use egui::Context;
+use serde::{Deserialize, Serialize};
+use std::future::Future;
+use std::sync::mpsc::{channel, Receiver, Sender};
 
-    #[serde(skip)] // This how you opt-out of serialization of a field
-    value: f32,
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Question {
+    pub question: String,
+    pub hint1: String,
+    pub hint2: String,
+    pub answer: String,
 }
 
-impl Default for TemplateApp {
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
+pub struct Show {
+    question: bool,
+    hint1: bool,
+    hint2: bool,
+    answer: bool,
+}
+
+/// We derive Deserialize/Serialize so we can persist app state on shutdown.
+#[derive(Deserialize, Serialize)]
+#[serde(default)] // if we add new fields, give them default values when deserializing old state
+pub struct MyApp {
+    pixels_per_point: f32,
+    questions: Option<Vec<Question>>,
+    question_nr: usize,
+    prev_question_nr: usize,
+    show: Show,
+    #[serde(skip)]
+    file_io: (Sender<String>, Receiver<String>),
+}
+
+impl Default for MyApp {
     fn default() -> Self {
         Self {
-            // Example stuff:
-            label: "Hello World!".to_owned(),
-            value: 2.7,
+            pixels_per_point: 2.0,
+            questions: None,
+            question_nr: 0,
+            prev_question_nr: 0,
+            show: Default::default(),
+            file_io: channel(),
         }
     }
 }
-
-impl TemplateApp {
+impl MyApp {
     /// Called once before the first frame.
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         // This is also where you can customize the look and feel of egui using
@@ -28,14 +53,15 @@ impl TemplateApp {
         // Load previous app state (if any).
         // Note that you must enable the `persistence` feature for this to work.
         if let Some(storage) = cc.storage {
-            return eframe::get_value(storage, eframe::APP_KEY).unwrap_or_default();
+            let mut app: Self = eframe::get_value(storage, eframe::APP_KEY).unwrap_or_default();
+            app.show = Default::default();
+            return app;
         }
-
         Default::default()
     }
 }
 
-impl eframe::App for TemplateApp {
+impl eframe::App for MyApp {
     /// Called by the frame work to save state before shutdown.
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
         eframe::set_value(storage, eframe::APP_KEY, self);
@@ -43,67 +69,122 @@ impl eframe::App for TemplateApp {
 
     /// Called each time the UI needs repainting, which may be many times per second.
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        // Put your widgets into a `SidePanel`, `TopBottomPanel`, `CentralPanel`, `Window` or `Area`.
-        // For inspiration and more examples, go to https://emilk.github.io/egui
+        ctx.set_pixels_per_point(self.pixels_per_point);
+        if self.question_nr != self.prev_question_nr {
+            self.prev_question_nr = self.question_nr;
+            self.show = Default::default();
+        }
+
+        // Parsing questions from file picker
+        if let Ok(quiz) = self.file_io.1.try_recv() {
+            if let Ok(quiz) = serde_json::from_str::<Vec<Question>>(&quiz) {
+                if quiz.len() >= 1 {
+                    self.questions = Some(quiz);
+                    self.question_nr = 0;
+                }
+            }
+        }
 
         egui::TopBottomPanel::top("top_panel").show(ctx, |ui| {
-            // The top panel is often a good place for a menu bar:
-
             egui::menu::bar(ui, |ui| {
-                // NOTE: no File->Quit on web pages!
-                let is_web = cfg!(target_arch = "wasm32");
-                if !is_web {
-                    ui.menu_button("File", |ui| {
-                        if ui.button("Quit").clicked() {
-                            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-                        }
-                    });
-                    ui.add_space(16.0);
+                if ui.button("Quiz öffnen").clicked() {
+                    let ctx = ctx.clone();
+                    let tx = self.file_io.0.clone();
+                    file_dialog(tx, ctx); // opens the file dialog in a background thread
                 }
-
-                egui::widgets::global_theme_preference_buttons(ui);
+                ui.separator();
+                ui.heading("Frage: ");
+                if ui.button("<<").clicked() {
+                    self.question_nr = self.question_nr.saturating_sub(1);
+                }
+                if let Some(questions) = self.questions.as_ref() {
+                    ui.add(
+                        egui::widgets::DragValue::new(&mut self.question_nr)
+                            .range(0..=questions.len()),
+                    );
+                } else {
+                    ui.add_enabled(false, egui::widgets::DragValue::new(&mut self.question_nr));
+                }
+                if ui.button(">>").clicked() {
+                    self.question_nr = self.question_nr.saturating_add(1);
+                }
+                ui.separator();
+                ui.heading("Größe");
+                if ui.button("+").clicked() {
+                    self.pixels_per_point += 0.1;
+                }
+                if ui.button("-").clicked() {
+                    self.pixels_per_point = (self.pixels_per_point - 0.1).max(0.1);
+                }
             });
         });
 
         egui::CentralPanel::default().show(ctx, |ui| {
-            // The central panel the region left after adding TopPanel's and SidePanel's
-            ui.heading("eframe template");
+            let question = self.questions.as_ref().map(|q| q.get(self.question_nr));
+            if let Some(Some(question)) = question {
+                ui.horizontal(|ui| {
+                    if ui.button("Frage: ").clicked() {
+                        self.show.question ^= true;
+                    }
 
-            ui.horizontal(|ui| {
-                ui.label("Write something: ");
-                ui.text_edit_singleline(&mut self.label);
-            });
-
-            ui.add(egui::Slider::new(&mut self.value, 0.0..=10.0).text("value"));
-            if ui.button("Increment").clicked() {
-                self.value += 1.0;
+                    match self.show.question {
+                        true => ui.label(&question.question),
+                        false => ui.label(""),
+                    }
+                });
+                ui.horizontal(|ui| {
+                    if ui.button("Hinweis 1: ").clicked() {
+                        self.show.hint1 ^= true;
+                    }
+                    match self.show.hint1 {
+                        true => ui.label(&question.hint1),
+                        false => ui.label(""),
+                    }
+                });
+                ui.horizontal(|ui| {
+                    if ui.button("Hinweis 2: ").clicked() {
+                        self.show.hint2 ^= true;
+                    }
+                    match self.show.hint2 {
+                        true => ui.label(&question.hint2),
+                        false => ui.label(""),
+                    }
+                });
+                ui.horizontal(|ui| {
+                    if ui.button("Antwort: ").clicked() {
+                        self.show.answer ^= true;
+                    }
+                    match self.show.answer {
+                        true => ui.label(&question.answer),
+                        false => ui.label(""),
+                    }
+                });
             }
-
-            ui.separator();
-
-            ui.add(egui::github_link_file!(
-                "https://github.com/emilk/eframe_template/blob/main/",
-                "Source code."
-            ));
-
-            ui.with_layout(egui::Layout::bottom_up(egui::Align::LEFT), |ui| {
-                powered_by_egui_and_eframe(ui);
-                egui::warn_if_debug_build(ui);
-            });
         });
     }
 }
 
-fn powered_by_egui_and_eframe(ui: &mut egui::Ui) {
-    ui.horizontal(|ui| {
-        ui.spacing_mut().item_spacing.x = 0.0;
-        ui.label("Powered by ");
-        ui.hyperlink_to("egui", "https://github.com/emilk/egui");
-        ui.label(" and ");
-        ui.hyperlink_to(
-            "eframe",
-            "https://github.com/emilk/egui/tree/master/crates/eframe",
-        );
-        ui.label(".");
+fn file_dialog(tx: Sender<String>, ctx: Context) {
+    let task = rfd::AsyncFileDialog::new().pick_file();
+    execute(async move {
+        let file = task.await;
+        if let Some(file) = file {
+            let data = file.read().await;
+            if let Ok(text) = String::from_utf8(data) {
+                let _ = tx.send(text);
+                ctx.request_repaint();
+            }
+        }
     });
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn execute<F: Future<Output = ()> + Send + 'static>(f: F) {
+    // this is stupid... use any executor of your choice instead
+    std::thread::spawn(move || smol::block_on(f));
+}
+
+#[cfg(target_arch = "wasm32")]
+fn execute<F: Future<Output = ()> + 'static>(f: F) {
+    wasm_bindgen_futures::spawn_local(f);
 }
