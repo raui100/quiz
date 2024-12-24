@@ -1,4 +1,4 @@
-use egui::Context;
+use egui::{Context, RichText};
 use serde::{Deserialize, Serialize};
 use std::future::Future;
 use std::sync::mpsc::{channel, Receiver, Sender};
@@ -35,7 +35,7 @@ pub struct MyApp {
 impl Default for MyApp {
     fn default() -> Self {
         Self {
-            pixels_per_point: 2.0,
+            pixels_per_point: 4.0,
             questions: None,
             question_nr: 0,
             prev_question_nr: 0,
@@ -87,34 +87,18 @@ impl eframe::App for MyApp {
 
         egui::TopBottomPanel::top("top_panel").show(ctx, |ui| {
             egui::menu::bar(ui, |ui| {
+                if ui.button("+").highlight().clicked() {
+                    self.pixels_per_point += 0.1;
+                }
+                if ui.button("−").highlight().clicked() {
+                    self.pixels_per_point = (self.pixels_per_point - 0.1).max(0.1);
+                }
+
+                ui.separator();
                 if ui.button("Quiz öffnen").clicked() {
                     let ctx = ctx.clone();
                     let tx = self.file_io.0.clone();
                     file_dialog(tx, ctx); // opens the file dialog in a background thread
-                }
-                ui.separator();
-                ui.heading("Frage: ");
-                if ui.button("<<").clicked() {
-                    self.question_nr = self.question_nr.saturating_sub(1);
-                }
-                if let Some(questions) = self.questions.as_ref() {
-                    ui.add(
-                        egui::widgets::DragValue::new(&mut self.question_nr)
-                            .range(0..=questions.len()),
-                    );
-                } else {
-                    ui.add_enabled(false, egui::widgets::DragValue::new(&mut self.question_nr));
-                }
-                if ui.button(">>").clicked() {
-                    self.question_nr = self.question_nr.saturating_add(1);
-                }
-                ui.separator();
-                ui.heading("Größe");
-                if ui.button("+").clicked() {
-                    self.pixels_per_point += 0.1;
-                }
-                if ui.button("-").clicked() {
-                    self.pixels_per_point = (self.pixels_per_point - 0.1).max(0.1);
                 }
             });
         });
@@ -123,43 +107,53 @@ impl eframe::App for MyApp {
             let question = self.questions.as_ref().map(|q| q.get(self.question_nr));
             if let Some(Some(question)) = question {
                 ui.horizontal(|ui| {
-                    if ui.button("Frage: ").clicked() {
-                        self.show.question ^= true;
+                    ui.label("Frage: ");
+                    if ui.button("<<").clicked() {
+                        self.question_nr = self.question_nr.saturating_sub(1);
                     }
+                    if let Some(questions) = self.questions.as_ref() {
+                        ui.add(
+                            egui::widgets::DragValue::new(&mut self.question_nr)
+                                .range(0..=questions.len()),
+                        );
+                    }
+                    if ui.button(">>").clicked() {
+                        self.question_nr = self.question_nr.saturating_add(1);
+                    }
+                });
 
-                    match self.show.question {
-                        true => ui.label(&question.question),
-                        false => ui.label(""),
-                    }
-                });
-                ui.horizontal(|ui| {
-                    if ui.button("Hinweis 1: ").clicked() {
-                        self.show.hint1 ^= true;
-                    }
-                    match self.show.hint1 {
-                        true => ui.label(&question.hint1),
-                        false => ui.label(""),
-                    }
-                });
-                ui.horizontal(|ui| {
-                    if ui.button("Hinweis 2: ").clicked() {
-                        self.show.hint2 ^= true;
-                    }
-                    match self.show.hint2 {
-                        true => ui.label(&question.hint2),
-                        false => ui.label(""),
-                    }
-                });
-                ui.horizontal(|ui| {
-                    if ui.button("Antwort: ").clicked() {
-                        self.show.answer ^= true;
-                    }
-                    match self.show.answer {
-                        true => ui.label(&question.answer),
-                        false => ui.label(""),
-                    }
-                });
-            }
+                if ui.button("Frage: ").clicked() {
+                    self.show.question ^= true;
+                }
+                match self.show.question {
+                    true => ui.label(RichText::new(&question.question)),
+                    false => ui.label(""),
+                };
+
+                if ui.button("Hinweis 1: ").clicked() {
+                    self.show.hint1 ^= true;
+                }
+                match self.show.hint1 {
+                    true => ui.label(&question.hint1),
+                    false => ui.label(""),
+                };
+
+                if ui.button("Hinweis 2: ").clicked() {
+                    self.show.hint2 ^= true;
+                }
+                match self.show.hint2 {
+                    true => ui.label(&question.hint2),
+                    false => ui.label(""),
+                };
+
+                if ui.button("Antwort: ").clicked() {
+                    self.show.answer ^= true;
+                }
+                match self.show.answer {
+                    true => ui.label(&question.answer),
+                    false => ui.label(""),
+                };
+            };
         });
     }
 }
